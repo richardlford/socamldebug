@@ -1,0 +1,4 @@
+(executable
+ (public_name socamldebug)
+ (name main)
+ (libraries socamldebug))
