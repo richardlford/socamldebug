@@ -1,2 +1,2 @@
 let _ =
-  Unix.handle_unix_error Ocamldebug.Main.main ()
+  Unix.handle_unix_error Main.main ()

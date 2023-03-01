@@ -23,4 +23,12 @@
  (tags
   (topics ocaml debugger)))
 
+(package
+ (name sdebugger)
+ (synopsis "Standalone OCaml Debugger Library")
+ (description "Library for an adaptation of the standard ocamldebug that can be built separately")
+ (depends ocaml dune)
+ (tags
+  (topics ocaml debugger)))
+
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/dune-files.html#dune-project

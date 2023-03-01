@@ -1,4 +1,6 @@
 (executable
  (public_name socamldebug)
- (name main)
- (libraries socamldebug))
+ (name socamldebug)
+ (package socamldebug)
+ (modes byte)
+ (libraries sdebugger))
