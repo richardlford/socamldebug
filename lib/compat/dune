@@ -1,0 +1,14 @@
+(library
+ (name soc_compat)
+ (public_name soc_compat)
+ (preprocess (pps ppx_optcomp))
+ (libraries 
+   compiler-libs.bytecomp
+   compiler-libs.common
+   compiler-libs.optcomp
+   compiler-libs.toplevel
+   str
+   unix
+   )
+ (flags (:standard -w "-9"))
+ )

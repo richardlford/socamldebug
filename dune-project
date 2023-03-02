@@ -20,7 +20,7 @@
  (name socamldebug)
  (synopsis "Standalone OCaml Debugger")
  (description "An adaptation of the standard ocamldebug that can be built separately")
- (depends ocaml dune)
+ (depends ocaml dune sdebugger)
  (tags
   (topics ocaml debugger)))
 
@@ -28,8 +28,16 @@
  (name sdebugger)
  (synopsis "Standalone OCaml Debugger Library")
  (description "Library for an adaptation of the standard ocamldebug that can be built separately")
- (depends ocaml dune)
+ (depends ocaml dune soc_compat)
  (tags
   (topics ocaml debugger)))
+
+(package
+ (name soc_compat)
+ (synopsis "Standalone OCaml Compatibility Library")
+ (description "Standalone OCaml utility compatibility Library")
+ (depends ocaml dune compiler-libs str unix)
+ (tags
+  (topics ocaml)))
 
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/dune-files.html#dune-project

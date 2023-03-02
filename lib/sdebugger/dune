@@ -31,4 +31,5 @@
    dynlink
    unix
    str
+   soc_compat
    ))

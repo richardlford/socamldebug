@@ -38,7 +38,7 @@ let do_workspace_map = not (Sys.file_exists workspace_marker)
 
 let add_workspace_root filename  =
   if do_workspace_map then begin
-    let the_realfile = Unix.realpath filename in
+    let the_realfile = Soc_compat.realpath filename in
     if Str.string_match build_re the_realfile 0 then begin
       let root = Str.matched_group 1 the_realfile in
       printf "Adding %s to workspace roots@." root;
@@ -48,7 +48,7 @@ let add_workspace_root filename  =
     
 let has_workspace_marker dir_name =
   (dir_name = workspace_marker) ||
-   String.starts_with ~prefix: workspace_marker_slash dir_name
+   Soc_compat.starts_with ~prefix: workspace_marker_slash dir_name
 
 (* Because we might have multiple workspace roots, a single
    filename might expand into multiple filenames. *)

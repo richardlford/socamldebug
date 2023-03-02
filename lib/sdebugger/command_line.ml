@@ -262,7 +262,7 @@ let instr_dir ppf lexbuf =
   let new_directory = argument_list_eol argument lexbuf in
     if new_directory = [] then begin
       if yes_or_no "Reinitialize directory list" then begin
-        Load_path.init !default_load_path;
+        Soc_compat.load_path_init !default_load_path;
         Envaux.reset_cache ();
         Hashtbl.clear Debugger_config.load_path_for;
         flush_buffer_list ()
@@ -624,7 +624,7 @@ let instr_break ppf lexbuf =
         in
         begin try
           let (v, ty) = Eval.expression !selected_event env expr in
-          match get_desc ty with
+          match Soc_compat.types_get_desc ty with
           | Tarrow _ ->
               add_breakpoint_after_pc (Remote_value.closure_code v)
           | _ ->
@@ -857,7 +857,7 @@ let instr_list _ppf lexbuf =
               1
           | None ->
               begin try
-                Int.max 1 (line - 10)
+                Soc_compat.int_max 1 (line - 10)
               with Out_of_range ->
                 1
               end
