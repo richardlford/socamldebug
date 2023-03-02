@@ -85,6 +85,8 @@ let make_checkpoints = ref
 (* Whether to break when new code is loaded. *)
 let break_on_load = ref true
 
+let event_detail = ref 1
+
 (*** Environment variables for debuggee. ***)
 
 let environment = ref []

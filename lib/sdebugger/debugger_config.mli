@@ -35,6 +35,7 @@ val checkpoint_small_step : int64 ref
 val checkpoint_max_count : int ref
 val make_checkpoints : bool ref
 val break_on_load : bool ref
+val event_detail : int ref
 
 (*** Environment variables for debuggee. ***)
 

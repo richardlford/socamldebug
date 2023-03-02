@@ -3,6 +3,7 @@
 (name socamldebug)
 
 (generate_opam_files true)
+(map_workspace_root true)
 
 (source
  (github richardlford/socamldebug))

@@ -22,6 +22,43 @@ open Program_loading
 open Debugcom
 open Events
 module String = Misc.Stdlib.String
+open Format
+
+(* List of directories to act as workspace roots. *)
+let workspace_roots = ref String.Set.empty
+
+let workspace_marker = "/workspace_root"
+let workspace_marker_slash = "/workspace_root/"
+
+let workspace_marker_len = String.length workspace_marker
+let build_re = Str.regexp {|\(.*\)/_build/.*|}
+
+(* We only try to map workspace roots if the marker does not exists. *)
+let do_workspace_map = not (Sys.file_exists workspace_marker)
+
+let add_workspace_root filename  =
+  if do_workspace_map then begin
+    let the_realfile = Unix.realpath filename in
+    if Str.string_match build_re the_realfile 0 then begin
+      let root = Str.matched_group 1 the_realfile in
+      printf "Adding %s to workspace roots@." root;
+      workspace_roots := String.Set.add root !workspace_roots
+    end
+  end
+    
+let has_workspace_marker dir_name =
+  (dir_name = workspace_marker) ||
+   String.starts_with ~prefix: workspace_marker_slash dir_name
+
+(* Because we might have multiple workspace roots, a single
+   filename might expand into multiple filenames. *)
+let expand_workspace_root dir_name =
+  if not (has_workspace_marker dir_name) then [dir_name]
+  else begin
+    let stem = String.sub dir_name workspace_marker_len 
+              (String.length dir_name - workspace_marker_len) in
+    List.map (fun root -> root ^ stem) (String.Set.elements !workspace_roots)
+  end
 
 let modules =
   ref ([] : string list)
@@ -55,6 +92,7 @@ let relocate_event orig ev =
   | _                 -> ()
 
 let read_symbols' bytecode_file =
+  add_workspace_root bytecode_file;
   let ic = open_in_bin bytecode_file in
   begin try
     Bytesections.read_toc ic;
@@ -80,8 +118,13 @@ let read_symbols' bytecode_file =
     List.iter (relocate_event orig) evl;
     let evll = partition_modules evl in
     eventlists := evll @ !eventlists;
+    let dirlist = (input_value ic : string list) in
     dirs :=
-      List.fold_left (fun s e -> String.Set.add e s) !dirs (input_value ic)
+      List.fold_left 
+      (fun s e -> 
+        let expanded_dirs = expand_workspace_root e in
+        List.fold_left (fun s d -> String.Set.add d s)  s expanded_dirs)
+      !dirs dirlist
   done;
   begin try
     ignore (Bytesections.seek_section ic "CODE")

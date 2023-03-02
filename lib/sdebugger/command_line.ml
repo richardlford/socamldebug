@@ -519,6 +519,7 @@ let print_command depth ppf lexbuf =
 
 let instr_print ppf lexbuf = print_command !max_printer_depth ppf lexbuf
 
+
 let instr_display ppf lexbuf = print_command 1 ppf lexbuf
 
 let instr_address ppf lexbuf =
@@ -691,6 +692,63 @@ let instr_frame ppf lexbuf =
       show_current_frame ppf true
     with
     | Not_found ->
+        error ("No frame number " ^ Int.to_string frame_number ^ ".")
+
+let instr_what ppf lexbuf =
+  let frame_number =
+    match opt_integer_eol Lexer.lexeme lexbuf with
+    | None -> !current_frame
+    | Some x -> x
+  in
+    ensure_loaded ();
+    try
+      select_frame frame_number;
+      match !selected_event with
+      | None -> ()
+      | Some sel_ev ->
+        show_current_frame ppf true;
+        Sdumper.print_ev sel_ev.ev_ev
+    with
+    | Not_found ->
+        error ("No frame number " ^ Int.to_string frame_number ^ ".")
+
+let id_table_names (idtbl: int Ident.tbl) =
+  let result: string list ref = ref [] in
+  Ident.iter (fun id valu -> result := (Ident.name id) :: !result) idtbl;
+  !result
+
+let comp_env_names (ev: Instruct.debug_event)  =
+    let ce : Instruct.compilation_env = ev.ev_compenv in
+    let stack : int Ident.tbl = ce.ce_stack in
+    let heap : int Ident.tbl = ce.ce_heap in
+    let recs : int Ident.tbl = ce.ce_rec in
+    (id_table_names stack) @ 
+    (id_table_names heap) @
+    (id_table_names recs)
+
+let xinstr_print ppf lexbuf = 
+  let frame_number =
+    match opt_integer_eol Lexer.lexeme lexbuf with
+    | None -> !current_frame
+    | Some x -> x
+  in
+    ensure_loaded ();
+    try
+      select_frame frame_number;
+      match !selected_event with
+      | None -> ()
+      | Some sel_ev ->
+        begin
+          show_current_frame ppf true;
+          let ce_names = List.rev (comp_env_names sel_ev.ev_ev) in
+          List.iter (fun line -> 
+            let lexbuf2 = Lexing.from_string line in
+            try print_command !max_printer_depth ppf lexbuf2
+            with _ -> ()
+            ) ce_names
+        end
+      with
+      | Not_found ->
         error ("No frame number " ^ Int.to_string frame_number ^ ".")
 
 let instr_backtrace ppf lexbuf =
@@ -981,7 +1039,19 @@ let info_events _ppf lexbuf =
            (match ev.ev_repr with
               Event_none        -> ""
             | Event_parent _    -> "(repr)"
-            | Event_child repr  -> Int.to_string !repr))
+            | Event_child repr  -> Int.to_string !repr);
+          if !event_detail >= 1 then begin
+            show_point ev false;
+            if !event_detail >= 2 then begin
+              printf "@[<2>{Ids in scope:@ ";
+              List.iter (fun id -> printf "%s@ " id) (comp_env_names ev);
+              printf "}@]@.";
+              if !event_detail >= 3 then begin
+                Sdumper.print_ev ev
+              end
+            end
+          end
+          )
       events
 
 (** User-defined printers **)
@@ -1083,6 +1153,9 @@ Argument N means do this N times (or till program stops for another reason)." };
      { instr_name = "print"; instr_prio = true;
        instr_action = instr_print; instr_repeat = true; instr_help =
 "print value of expressions (deep printing)." };
+     { instr_name = "xprint"; instr_prio = true;
+       instr_action = xinstr_print; instr_repeat = true; instr_help =
+"print value of all variables (deep printing)." };
      { instr_name = "display"; instr_prio = true;
        instr_action = instr_display; instr_repeat = true; instr_help =
 "print value of expressions (shallow printing)." };
@@ -1118,6 +1191,11 @@ To delete all breakpoints, give no argument." };
      { instr_name = "frame"; instr_prio = false;
        instr_action = instr_frame; instr_repeat = true; instr_help =
 "select and print a stack frame.\n\
+With no argument, print the selected stack frame.\n\
+An argument specifies the frame to select." };
+     { instr_name = "what"; instr_prio = false;
+       instr_action = instr_what; instr_repeat = false; instr_help =
+"select a stack frame and show what is available.\n\
 With no argument, print the selected stack frame.\n\
 An argument specifies the frame to select." };
      { instr_name = "backtrace"; instr_prio = false;
@@ -1221,7 +1299,18 @@ It can be either :\n\
      { var_name = "break_on_load";
        var_action = boolean_variable false break_on_load;
        var_help =
-"whether to stop after loading new code (e.g. with Dynlink)." }];
+"whether to stop after loading new code (e.g. with Dynlink)." };
+     { var_name = "event_detail";
+       var_action = integer_variable false 0 "Must be at least 0"
+                                     event_detail;
+       var_help = 
+"Amount of detail to give details when listing events.\n\
+  0 = minimal information,\n\
+  1 = adds display of source\n\
+  2 = adds display of in-scope identifiers\n\
+  3 = verbose display
+"}
+];
 
   info_list :=
     (* info name, function, help *)
