@@ -19,6 +19,9 @@ open Events
 (* Modules used by the program. *)
 val modules : string list ref
 
+(* Modules used by the program. *)
+val functions : string list ref
+
 (* Absolute directories containing source code on machine where source was
  * compiled *)
 val program_source_dirs : string list ref
@@ -28,7 +31,7 @@ val clear_symbols : unit -> unit
 
 (* Read debugging info from executable or dynlinkable file
    and associate with given code fragment *)
-val read_symbols : int -> string -> unit
+val read_symbols : int -> string -> in_channel
 
 (* Add debugging info from memory and associate with given
    code fragment *)

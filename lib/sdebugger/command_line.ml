@@ -601,6 +601,25 @@ let instr_info =
     (function _ppf ->
        error "\"info\" must be followed by the name of an info command.")
 
+(* returns true if it succeeds *)
+let add_fun_break_from_tables expr =
+  (* Try our table of functions *)
+  match expr with
+  | E_ident lid -> 
+    begin
+    let name = (String.concat "." (Longident.flatten lid)) in
+    let opt_pc = Hashtbl.find_opt Functions.pc_by_function name in
+    match opt_pc with
+    | Some pc -> 
+      eprintf "Using function tables";
+      add_breakpoint_at_pc pc;
+      true
+    | None ->
+        false
+    end
+  | _ ->
+   false
+
 let instr_break ppf lexbuf =
   let argument = break_argument_eol Lexer.lexeme lexbuf in
     ensure_loaded ();
@@ -614,6 +633,7 @@ let instr_break ppf lexbuf =
     | BA_pc {frag; pos} ->                      (* break PC *)
         add_breakpoint_at_pc {frag; pos}
     | BA_function expr ->                       (* break FUNCTION *)
+        if not (add_fun_break_from_tables expr) then
         let env =
           try
             env_of_event !selected_event
@@ -971,6 +991,22 @@ let info_modules ppf lexbuf =
      print_newline ())
 *********)
 
+let pr_functions ppf prefix funs =
+ let pr_funs ppf = List.iter 
+ (function x -> 
+  match prefix with
+  | Some prefix -> 
+    if Soc_compat.starts_with ~prefix x then
+      fprintf ppf "%s@ " x
+  | None -> fprintf ppf "%s@ " x)
+ in
+ fprintf ppf "Used functions: @.%a@?" pr_funs funs
+
+let info_functions ppf lexbuf =
+  let prefix = module_of_longident (opt_longident_eol Lexer.lexeme lexbuf) in
+  ensure_loaded ();
+  pr_functions ppf prefix !functions
+
 let info_checkpoints ppf lexbuf =
   eol lexbuf;
   if !checkpoints = [] then fprintf ppf "No checkpoint.@."
@@ -1317,6 +1353,9 @@ It can be either :\n\
     [{ info_name = "modules";
        info_action = info_modules ppf;
        info_help = "list opened modules." };
+     { info_name = "functions";
+       info_action = info_functions ppf;
+       info_help = "list opened functions matching optional prefix (or all)." };     
      { info_name = "checkpoints";
        info_action = info_checkpoints ppf;
        info_help = "list checkpoints." };

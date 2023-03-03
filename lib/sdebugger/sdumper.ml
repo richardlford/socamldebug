@@ -39,43 +39,45 @@ let rec print_struct_const ppf = function
 let same_custom x y =
   Obj.field x 0 = Obj.field (Obj.repr y) 0
 
-let rec print_obj ppf x =
+
+
+let rec print_obj x =
   if Obj.is_block x then begin
     let tag = Obj.tag x in
     if tag = Obj.string_tag then
-        fprintf ppf "%S" (Obj.magic x : string)
+        printf "%S" (Obj.magic x : string)
     else if tag = Obj.double_tag then
-        fprintf ppf "%.12g" (Obj.magic x : float)
+        printf "%.12g" (Obj.magic x : float)
     else if tag = Obj.double_array_tag then begin
         let a = (Obj.magic x : floatarray) in
-        fprintf ppf "[|";
+        printf "[|";
         for i = 0 to Array.Floatarray.length a - 1 do
-          if i > 0 then fprintf ppf ", ";
-          fprintf ppf "%.12g" (Array.Floatarray.get a i)
+          if i > 0 then printf ", ";
+          printf "%.12g" (Array.Floatarray.get a i)
         done;
-        fprintf ppf "|]"
+        printf "|]"
     end else if tag = Obj.custom_tag && same_custom x 0l then
-        fprintf ppf "%ldl" (Obj.magic x : int32)
+        printf "%ldl" (Obj.magic x : int32)
     else if tag = Obj.custom_tag && same_custom x 0n then
-        fprintf ppf "%ndn" (Obj.magic x : nativeint)
+        printf "%ndn" (Obj.magic x : nativeint)
     else if tag = Obj.custom_tag && same_custom x 0L then
-        fprintf ppf "%LdL" (Obj.magic x : int64)
+        printf "%LdL" (Obj.magic x : int64)
     else if tag < Obj.no_scan_tag then begin
-        fprintf ppf "<%d>" (Obj.tag x);
+        printf "<%d>" (Obj.tag x);
         match Obj.size x with
           0 -> ()
         | 1 ->
-            fprintf ppf "("; print_obj ppf (Obj.field x 0); fprintf ppf ")"
+            printf "("; print_obj (Obj.field x 0); printf ")"
         | n ->
-            fprintf ppf "("; print_obj ppf (Obj.field x 0);
+            printf "("; print_obj (Obj.field x 0);
             for i = 1 to n - 1 do
-              fprintf ppf ", "; print_obj ppf (Obj.field x i)
+              printf ", "; print_obj (Obj.field x i)
             done;
-            fprintf ppf ")"
+            printf ")"
     end else
-        fprintf ppf "<tag %d>" tag
+        printf "<tag %d>" tag
   end else
-    fprintf ppf "%d" (Obj.magic x : int)
+    printf "%d" (Obj.magic x : int)
 
     let kind_string ev =
     (match ev.Instruct.ev_kind with
@@ -331,6 +333,44 @@ type debug_event =
 
 *)
 
+let print_stack_and_env (ev: Instruct.debug_event) =
+  let ce = ev.ev_compenv in
+  let heap : int Ident.tbl = ce.ce_heap in
+  (* Find number of heap elements. They start a 2 since slot 0
+     has the starting pc and slot 1 has the arity and env start. *)
+  let hmax = ref 0 in
+  Ident.iter (fun id idval -> 
+      if idval > !hmax then
+        hmax := idval;
+      ) heap;
+  let sz = ev.ev_stacksize in
+  if sz = 0 && !hmax = 0 then () else begin
+    if sz > 0 then begin
+      let ray = Array.make sz "" in
+      let stack : int Ident.tbl = ce.ce_stack in
+      Ident.iter (fun id idval -> 
+        ray.(sz - idval) <- Ident.name id;
+        ) stack;
+      printf "@[<2>{Stack:";
+      for i = 0 to sz - 1 do
+        printf "@ %d:%s" i ray.(i)
+      done;
+      printf "@]}@ ";
+    end;
+    if !hmax > 0 then begin
+      let ray = Array.make (!hmax+1) "" in
+      Ident.iter (fun id idval -> 
+        ray.(idval) <- Ident.name id;
+        ) heap;
+      printf "@[<2>{Heap:";
+      for i = 2 to !hmax do
+        printf "@ %d:%s" i ray.(i)
+      done;
+      printf "@]}@ ";
+    end;
+    printf "@.";
+  end
+
 let print_ev (ev: Instruct.debug_event) =
   printf "pc=%d(=4*%d),@ " ev.Instruct.ev_pos (ev.Instruct.ev_pos/4 );
   printf "ev_module=%s@ " ev.Instruct.ev_module;
@@ -346,3 +386,21 @@ let print_ev (ev: Instruct.debug_event) =
   printf "ev_stacksize=%d,@ " ev.ev_stacksize;
   printf "ev_repr=%s,@ " (repr_string ev);
   printf "@."
+
+  let print_full_events_flag = ref false
+
+  let print_event (ev: Instruct.debug_event) =
+  let ls = ev.ev_loc.loc_start in
+  let fname = ls.Lexing.pos_fname in
+  if !print_full_events_flag then
+    print_ev ev
+  else 
+    let le = ev.ev_loc.loc_end in
+    printf "Def %s, Mod %s, File \"%s\", line %d, characters %d-%d:@." 
+    ev.ev_defname ev.ev_module
+    fname
+      ls.Lexing.pos_lnum (ls.Lexing.pos_cnum - ls.Lexing.pos_bol)
+      (le.Lexing.pos_cnum - ls.Lexing.pos_bol);
+    Show_source.show_point ev true;
+    print_stack_and_env ev
+

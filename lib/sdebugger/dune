@@ -21,7 +21,7 @@
  (name sdebugger)
  (public_name sdebugger)
  (modes byte)
- (flags (:standard -w -9..37))
+ (flags (:standard -w -9..69))
  (modules_without_implementation parser_aux)
  (libraries
    compiler-libs.bytecomp

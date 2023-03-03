@@ -66,12 +66,17 @@ let modules =
 let program_source_dirs =
   ref ([] : string list)
 
+let functions =
+  ref ([] : string list)
+
 let events_by_pc =
   (Hashtbl.create 257 : (pc, debug_event) Hashtbl.t)
 let events_by_module =
   (Hashtbl.create 17 : (string, int * debug_event array) Hashtbl.t)
 let all_events_by_module =
   (Hashtbl.create 17 : (string, int * debug_event list) Hashtbl.t)
+let events_by_function =
+  (Hashtbl.create 17 : (string, int * debug_event array) Hashtbl.t)
 
 let partition_modules evl =
   let rec partition_modules' ev evl =
@@ -126,15 +131,7 @@ let read_symbols' bytecode_file =
         List.fold_left (fun s d -> String.Set.add d s)  s expanded_dirs)
       !dirs dirlist
   done;
-  begin try
-    ignore (Bytesections.seek_section ic "CODE")
-  with Not_found ->
-    (* The file contains only debugging info,
-       loading mode is forced to "manual" *)
-    set_launching_function (List.assoc "manual" loading_modes)
-  end;
-  close_in_noerr ic;
-  !eventlists, !dirs
+  !eventlists, !dirs, ic
 
 let clear_symbols () =
   modules := [];
@@ -170,12 +167,46 @@ let add_symbols frag all_events =
               sorted_evl
           in
           Hashtbl.add events_by_module md (frag, Array.of_list real_evl))
-    all_events
+    all_events;
+
+  (* Get events by function. First accumulate events by function name. *)
+  let ev_by_fun_name =
+     (Hashtbl.create 17 : (string, debug_event list ref) Hashtbl.t) in
+
+  List.iter
+  (fun evl ->
+    List.iter
+      (fun ev ->
+        let fun_name = ev.ev_defname in
+        if Hashtbl.mem ev_by_fun_name fun_name then begin
+          let evlr = Hashtbl.find ev_by_fun_name fun_name in
+          evlr := ev :: !evlr; ()
+        end else begin
+          let evlr = ref [ev] in
+          Hashtbl.add ev_by_fun_name fun_name evlr; ()
+        end;
+
+        Hashtbl.add events_by_pc {frag; pos = ev.ev_pos} ev)
+      evl)
+  all_events;
+
+  (* Now get sorted event arrays. *)
+  Hashtbl.iter
+  (fun fun_name evlr ->
+    functions := fun_name :: !functions;
+    let cmp ev1 ev2 = compare (Events.get_pos ev1).Lexing.pos_cnum
+                              (Events.get_pos ev2).Lexing.pos_cnum
+    in
+    let sorted_evl = List.sort cmp !evlr in
+    Hashtbl.add events_by_function fun_name (frag, Array.of_list sorted_evl))
+  ev_by_fun_name;
+  functions := List.sort compare !functions
 
 let read_symbols frag bytecode_file =
-  let all_events, all_dirs = read_symbols' bytecode_file in
+  let all_events, all_dirs, ic = read_symbols' bytecode_file in
   program_source_dirs := !program_source_dirs @ (String.Set.elements all_dirs);
-  add_symbols frag all_events
+  add_symbols frag all_events;
+  ic
 
 let erase_symbols frag =
   let pcs = Hashtbl.fold (fun pc _ pcs ->
