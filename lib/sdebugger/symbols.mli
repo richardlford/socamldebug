@@ -26,6 +26,10 @@ val functions : string list ref
  * compiled *)
 val program_source_dirs : string list ref
 
+val start_pc_by_function : (string, Debugcom.pc list ref) Hashtbl.t
+
+val exported_items_by_module : (string, int * string array) Hashtbl.t
+
 (* Clear loaded symbols *)
 val clear_symbols : unit -> unit
 

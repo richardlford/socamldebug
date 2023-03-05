@@ -333,6 +333,16 @@ type debug_event =
 
 *)
 
+let get_stack (ev: Instruct.debug_event) =
+  let ce = ev.ev_compenv in
+  let sz = ev.ev_stacksize in
+  let ray = Array.make sz "" in
+  let stack : int Ident.tbl = ce.ce_stack in
+  Ident.iter (fun id idval -> 
+    ray.(sz - idval) <- Ident.name id;
+    ) stack;
+  ray
+
 let print_stack_and_env (ev: Instruct.debug_event) =
   let ce = ev.ev_compenv in
   let heap : int Ident.tbl = ce.ce_heap in
@@ -395,12 +405,11 @@ let print_ev (ev: Instruct.debug_event) =
   if !print_full_events_flag then
     print_ev ev
   else 
-    let le = ev.ev_loc.loc_end in
-    printf "Def %s, Mod %s, File \"%s\", line %d, characters %d-%d:@." 
+    printf "Def %s, Mod %s, %s%s " 
     ev.ev_defname ev.ev_module
-    fname
-      ls.Lexing.pos_lnum (ls.Lexing.pos_cnum - ls.Lexing.pos_bol)
-      (le.Lexing.pos_cnum - ls.Lexing.pos_bol);
+    (kind_string ev) (info_string ev);
+    Location.print_loc std_formatter ev.ev_loc;
+    printf "@.";
     Show_source.show_point ev true;
     print_stack_and_env ev
 

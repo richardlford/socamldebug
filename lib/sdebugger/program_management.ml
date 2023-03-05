@@ -128,7 +128,7 @@ let initialize_loading () =
   end;
   Symbols.clear_symbols ();
   let ic = Symbols.read_symbols 0 !program_name in
-  Functions.find_functions 0 ic ;
+  (* Functions.find_functions 0 ic ; *)
   Soc_compat.load_path_init (Load_path.get_paths () @ !Symbols.program_source_dirs);
   Envaux.reset_cache ();
   if !debug_loading then

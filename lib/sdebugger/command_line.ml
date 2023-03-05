@@ -601,24 +601,40 @@ let instr_info =
     (function _ppf ->
        error "\"info\" must be followed by the name of an info command.")
 
-(* returns true if it succeeds *)
+
+       (* returns true if it succeeds *)
+
+let add_fun_break_from_tables' name =
+  (* Try our table of functions *)
+  let opt_pc = Hashtbl.find_opt Symbols.start_pc_by_function name in
+  match opt_pc with
+  | Some {contents} -> 
+    let pc = List.nth contents 0 in
+    add_breakpoint_at_pc pc;
+    true
+  | _ ->
+    false
+
 let add_fun_break_from_tables expr =
   (* Try our table of functions *)
   match expr with
   | E_ident lid -> 
     begin
-    let name = (String.concat "." (Longident.flatten lid)) in
-    let opt_pc = Hashtbl.find_opt Functions.pc_by_function name in
-    match opt_pc with
-    | Some pc -> 
-      eprintf "Using function tables";
-      add_breakpoint_at_pc pc;
-      true
-    | None ->
-        false
+      let name = (String.concat "." (Longident.flatten lid)) in
+      if add_fun_break_from_tables' name then true
+      else begin
+        (* Try to add current module, if any. *)
+        match !current_event with
+        | Some {ev_frag; ev_ev} -> 
+          begin
+            let md = ev_ev.ev_module in
+            let name2 = md ^ "." ^ name in
+            add_fun_break_from_tables' name2
+          end
+          | _ -> false
+      end
     end
-  | _ ->
-   false
+  | _ -> false
 
 let instr_break ppf lexbuf =
   let argument = break_argument_eol Lexer.lexeme lexbuf in
@@ -633,7 +649,7 @@ let instr_break ppf lexbuf =
     | BA_pc {frag; pos} ->                      (* break PC *)
         add_breakpoint_at_pc {frag; pos}
     | BA_function expr ->                       (* break FUNCTION *)
-        if not (add_fun_break_from_tables expr) then
+      if not (add_fun_break_from_tables expr) then
         let env =
           try
             env_of_event !selected_event

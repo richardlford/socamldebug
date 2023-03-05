@@ -78,6 +78,12 @@ let all_events_by_module =
 let events_by_function =
   (Hashtbl.create 17 : (string, int * debug_event array) Hashtbl.t)
 
+let start_pc_by_function =
+  (Hashtbl.create 17 : (string, pc list ref) Hashtbl.t)
+
+let exported_items_by_module =
+  (Hashtbl.create 17 : (string, int * string array) Hashtbl.t)
+
 let partition_modules evl =
   let rec partition_modules' ev evl =
     match evl with
@@ -137,7 +143,102 @@ let clear_symbols () =
   modules := [];
   program_source_dirs := [];
   Hashtbl.clear events_by_pc; Hashtbl.clear events_by_module;
-  Hashtbl.clear all_events_by_module
+  Hashtbl.clear all_events_by_module;
+  functions := [];
+  Hashtbl.clear start_pc_by_function; Hashtbl.clear exported_items_by_module
+
+let print_evl evl =
+    List.iteri (fun i ev -> 
+      printf "ev[%d]=" i; 
+      Sdumper.print_event ev
+      ) evl
+
+let print_functions () =
+  printf "@[<2>{Function starts:@ ";
+  List.iter (fun fname -> 
+    let pcs = Hashtbl.find start_pc_by_function fname in
+      printf "@[{Func: %s:@ " fname;
+      List.iteri (fun i {frag;pos} -> 
+        printf "startpc[%i]%d:%d(%d)@ " i frag pos (pos/4)
+        ) !pcs;
+      printf "}@]@.";
+    ) !functions;
+  printf "}@]@."
+
+let print_exports () =
+  printf "{Module exports;@.";
+  List.iter (fun md ->
+    try 
+      begin
+        let (frag, exports) = Hashtbl.find exported_items_by_module md in
+        printf "@[<2>{frag=%d, mod=%s, exports:@ " frag md;
+        for i = 0 to (Array.length exports - 1) do
+          printf "%i:%s@ " i exports.(i)
+        done;
+        printf "}@]@.";
+      end
+    with Not_found -> 
+      printf "Module %s not found@." md
+    ) !modules;
+  printf "}@."
+
+let add_functions frag evl =
+  (* 
+  printf "add_functions, frag=%d, events:@." frag;
+  print_evl evl;
+  *)
+  List.iter (fun ev ->
+    let md = ev.ev_module in
+    let fname = ev.ev_defname in
+    let flen = String.length fname in
+    if fname = "??" then begin
+      if ev.ev_kind = Event_pseudo then begin
+        if ev.ev_stacksize > 0 then
+          let stack = Sdumper.get_stack ev in
+          if Array.length stack > 0 then
+            Hashtbl.add exported_items_by_module md (frag, stack);
+      end
+    end else if flen > 5 && String.sub fname (flen - 5) 5 = "(fun)" then begin
+      (* Skip anonymous functions and operators *)
+      ()
+    end else begin
+      if (ev.ev_kind = Event_before || ev.ev_kind=Event_pseudo) && 
+          ev.ev_info=Event_function then begin
+        let pc = {frag; pos=ev.ev_pos } in
+        (* Start of new function *)
+        if Hashtbl.mem start_pc_by_function fname then begin
+          let prior = Hashtbl.find start_pc_by_function fname in
+          prior := pc :: !prior
+        end else
+          Hashtbl.add start_pc_by_function fname (ref [pc])
+      end
+    end
+    ) evl
+  
+let fill_unique_simple_names () =
+  let short_to_long = 
+    (Hashtbl.create 257 : (string, string list ref ) Hashtbl.t) in
+  Hashtbl.iter (fun fname entry -> 
+    let last_dot_opt = String.rindex_opt fname '.' in
+    match last_dot_opt with
+    | None -> ()
+    | Some ld -> 
+      let sname = String.sub fname (ld + 1) (String.length fname - ld - 1) in
+      if Hashtbl.mem short_to_long sname then
+        let entry = Hashtbl.find short_to_long sname in
+        entry := fname :: !entry
+      else
+        Hashtbl.add short_to_long sname (ref [fname])
+    ) start_pc_by_function;
+
+  (* Now see which simple names are unique. *)
+  Hashtbl.iter (fun sname entry ->
+    match !entry with
+    | [fname] -> (* it is unique *)
+      let entry = Hashtbl.find start_pc_by_function fname in
+      Hashtbl.add start_pc_by_function sname entry
+    | _ -> () (* Not unique *)
+    ) short_to_long
 
 let add_symbols frag all_events =
   List.iter
@@ -157,6 +258,7 @@ let add_symbols frag all_events =
                                     (Events.get_pos ev2).Lexing.pos_cnum
           in
           let sorted_evl = List.sort cmp evl in
+          add_functions frag sorted_evl;
           modules := md :: !modules;
           Hashtbl.add all_events_by_module md (frag, sorted_evl);
           let real_evl =
@@ -168,40 +270,18 @@ let add_symbols frag all_events =
           in
           Hashtbl.add events_by_module md (frag, Array.of_list real_evl))
     all_events;
-
-  (* Get events by function. First accumulate events by function name. *)
-  let ev_by_fun_name =
-     (Hashtbl.create 17 : (string, debug_event list ref) Hashtbl.t) in
-
-  List.iter
-  (fun evl ->
-    List.iter
-      (fun ev ->
-        let fun_name = ev.ev_defname in
-        if Hashtbl.mem ev_by_fun_name fun_name then begin
-          let evlr = Hashtbl.find ev_by_fun_name fun_name in
-          evlr := ev :: !evlr; ()
-        end else begin
-          let evlr = ref [ev] in
-          Hashtbl.add ev_by_fun_name fun_name evlr; ()
-        end;
-
-        Hashtbl.add events_by_pc {frag; pos = ev.ev_pos} ev)
-      evl)
-  all_events;
-
-  (* Now get sorted event arrays. *)
-  Hashtbl.iter
-  (fun fun_name evlr ->
-    functions := fun_name :: !functions;
-    let cmp ev1 ev2 = compare (Events.get_pos ev1).Lexing.pos_cnum
-                              (Events.get_pos ev2).Lexing.pos_cnum
-    in
-    let sorted_evl = List.sort cmp !evlr in
-    Hashtbl.add events_by_function fun_name (frag, Array.of_list sorted_evl))
-  ev_by_fun_name;
-  functions := List.sort compare !functions
-
+  fill_unique_simple_names ();
+  Hashtbl.iter (fun fname v ->
+    functions := fname :: !functions;
+    ) start_pc_by_function;
+  functions := List.sort compare !functions;
+  modules := List.rev !modules
+  (*
+  print_functions ();
+  print_exports ()
+  
+  *)
+  
 let read_symbols frag bytecode_file =
   let all_events, all_dirs, ic = read_symbols' bytecode_file in
   program_source_dirs := !program_source_dirs @ (String.Set.elements all_dirs);

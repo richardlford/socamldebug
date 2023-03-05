@@ -1,3 +1,4 @@
+(*
 open Format
 open Debugcom
 open Opcodes
@@ -293,6 +294,7 @@ type parsed_instr =
 let parse_instr  frag ic : parsed_instr =
   let pos = currpos ic in 
   let pc = { frag; pos } in
+
   let code_ev =
     try Some (Symbols.any_event_at_pc pc)
     with
@@ -658,3 +660,5 @@ let find_functions frag (ic: in_channel) =
     set_launching_function (List.assoc "manual" loading_modes);
   
   close_in_noerr ic
+   
+*)
