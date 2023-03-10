@@ -39,8 +39,6 @@ let rec print_struct_const ppf = function
 let same_custom x y =
   Obj.field x 0 = Obj.field (Obj.repr y) 0
 
-
-
 let rec print_obj x =
   if Obj.is_block x then begin
     let tag = Obj.tag x in

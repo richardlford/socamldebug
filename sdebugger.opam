@@ -12,7 +12,7 @@ doc: "https://url/to/documentation"
 bug-reports: "https://github.com/richardlford/socamldebug/issues"
 depends: [
   "ocaml"
-  "dune" {>= "3.8"}
+  "dune" {>= "3.7"}
   "soc_compat"
   "odoc" {with-doc}
 ]

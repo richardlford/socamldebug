@@ -743,7 +743,7 @@ let instr_what ppf lexbuf =
       | None -> ()
       | Some sel_ev ->
         show_current_frame ppf true;
-        Sdumper.print_ev sel_ev.ev_ev
+        Sdumper.print_event sel_ev.ev_ev
     with
     | Not_found ->
         error ("No frame number " ^ Int.to_string frame_number ^ ".")

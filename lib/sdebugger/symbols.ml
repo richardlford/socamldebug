@@ -31,7 +31,34 @@ let workspace_marker = "/workspace_root"
 let workspace_marker_slash = "/workspace_root/"
 
 let workspace_marker_len = String.length workspace_marker
-let build_re = Str.regexp {|\(.*\)/_build/.*|}
+let build_dir = "_build"
+
+(* Does str.[index] match a file separator. *)
+let matches_file_sep str index =
+  if index >= String.length str then false
+  else let c = str.[index] in
+    (c = '/' || c = '\\')
+
+let matches_substring pat str start =
+  let pat_len = String.length pat in
+  let str_len = String.length str in
+  if (start + pat_len) > str_len then 
+    (* Not enough characters *)
+    false
+  else
+    String.sub str start pat_len = pat
+
+let find_last_build_dir_in (dir: string) =
+  let bdlen = String.length build_dir in
+  let rec loop i =
+    if i < 0 then None
+    else 
+      if (matches_file_sep dir i) &&
+        (matches_substring build_dir dir (i + 1)) &&
+        (matches_file_sep dir (i + bdlen + 1)) then Some i
+      else loop (i - 1)
+    in
+    loop (String.length dir - 1)
 
 (* We only try to map workspace roots if the marker does not exists. *)
 let do_workspace_map = not (Sys.file_exists workspace_marker)
@@ -39,11 +66,12 @@ let do_workspace_map = not (Sys.file_exists workspace_marker)
 let add_workspace_root filename  =
   if do_workspace_map then begin
     let the_realfile = Soc_compat.realpath filename in
-    if Str.string_match build_re the_realfile 0 then begin
-      let root = Str.matched_group 1 the_realfile in
+    match find_last_build_dir_in the_realfile with
+    | None -> ()
+    | Some i -> 
+      let root = String.sub the_realfile 0 i in
       printf "Adding %s to workspace roots@." root;
       workspace_roots := String.Set.add root !workspace_roots
-    end
   end
     
 let has_workspace_marker dir_name =
