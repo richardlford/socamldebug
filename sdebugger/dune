@@ -22,6 +22,7 @@
  (public_name sdebugger)
  (modes byte)
  (flags (:standard -w -8..69))
+ (preprocess (pps ppx_optcomp))
  (modules_without_implementation parser_aux)
  (libraries
    compiler-libs.bytecomp

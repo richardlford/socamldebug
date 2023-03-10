@@ -1,4 +1,4 @@
 (lang dune 3.7)
 (context (opam (switch 4.12.1rlf)))
 (context (opam (switch 4.14.1rlf)))
-(context (opam (switch 5.0.0)))
+(context (opam (switch 5.0.0o)))

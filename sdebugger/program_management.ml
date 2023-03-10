@@ -127,16 +127,16 @@ let initialize_loading () =
     raise Toplevel;
   end;
   Symbols.clear_symbols ();
-  let ic = Symbols.read_symbols 0 !program_name in
-  (* Functions.find_functions 0 ic ; *)
-  Soc_compat.load_path_init (Load_path.get_paths () @ !Symbols.program_source_dirs);
+  let ic =  Symbols.read_symbols Debugcom.main_frag !program_name in
+  let dirs = Load_path.get_paths () @ !Symbols.program_source_dirs in
+  Soc_compat.load_path_init dirs;
   Envaux.reset_cache ();
   if !debug_loading then
     prerr_endline "Opening a socket...";
   open_connection !socket_name
     (function () ->
       go_to _0;
-      Symbols.set_all_events 0;
+      Symbols.set_all_events Debugcom.main_frag;
       exit_main_loop ())
 
 (* Ensure the program is already loaded. *)

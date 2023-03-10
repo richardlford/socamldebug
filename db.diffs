@@ -1,0 +1,1313 @@
+diff -ru sdebugger/checkpoints.ml /home/fordrl/e/ocaml5-fresh/debugger/checkpoints.ml
+--- sdebugger/checkpoints.ml	2023-03-01 06:57:30.306937130 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/checkpoints.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -44,7 +44,7 @@
+   mutable c_parent : checkpoint;
+   mutable c_breakpoint_version : int;
+   mutable c_breakpoints : (pc * int ref) list;
+-  mutable c_trap_barrier : int;
++  mutable c_trap_barrier : Sp.t;
+   mutable c_code_fragments : int list
+   }
+ 
+@@ -60,8 +60,8 @@
+   c_parent = root;
+   c_breakpoint_version = 0;
+   c_breakpoints = [];
+-  c_trap_barrier = 0;
+-  c_code_fragments = [0]
++  c_trap_barrier = Sp.null;
++  c_code_fragments = [main_frag]
+   }
+ 
+ (*** Current state ***)
+diff -ru sdebugger/checkpoints.mli /home/fordrl/e/ocaml5-fresh/debugger/checkpoints.mli
+--- sdebugger/checkpoints.mli	2023-03-01 06:57:30.306937130 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/checkpoints.mli	2023-03-08 15:39:22.365632865 -0500
+@@ -43,7 +43,7 @@
+    mutable c_parent : checkpoint;
+    mutable c_breakpoint_version : int;
+    mutable c_breakpoints : (pc * int ref) list;
+-   mutable c_trap_barrier : int;
++   mutable c_trap_barrier : Sp.t;
+    mutable c_code_fragments : int list}
+ 
+ (*** Pseudo-checkpoint `root'. ***)
+@@ -57,4 +57,4 @@
+ val current_time : unit -> int64
+ val current_report : unit -> report option
+ val current_pc : unit -> pc option
+-val current_pc_sp : unit -> (pc * int) option
++val current_pc_sp : unit -> (pc * Sp.t) option
+diff -ru sdebugger/command_line.ml /home/fordrl/e/ocaml5-fresh/debugger/command_line.ml
+--- sdebugger/command_line.ml	2023-03-06 12:34:06.324356793 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/command_line.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -262,7 +262,7 @@
+   let new_directory = argument_list_eol argument lexbuf in
+     if new_directory = [] then begin
+       if yes_or_no "Reinitialize directory list" then begin
+-        Soc_compat.load_path_init !default_load_path;
++        Load_path.init ~auto_include:Compmisc.auto_include !default_load_path;
+         Envaux.reset_cache ();
+         Hashtbl.clear Debugger_config.load_path_for;
+         flush_buffer_list ()
+@@ -519,7 +519,6 @@
+ 
+ let instr_print ppf lexbuf = print_command !max_printer_depth ppf lexbuf
+ 
+-
+ let instr_display ppf lexbuf = print_command 1 ppf lexbuf
+ 
+ let instr_address ppf lexbuf =
+@@ -601,41 +600,6 @@
+     (function _ppf ->
+        error "\"info\" must be followed by the name of an info command.")
+ 
+-
+-       (* returns true if it succeeds *)
+-
+-let add_fun_break_from_tables' name =
+-  (* Try our table of functions *)
+-  let opt_pc = Hashtbl.find_opt Symbols.start_pc_by_function name in
+-  match opt_pc with
+-  | Some {contents} -> 
+-    let pc = List.nth contents 0 in
+-    add_breakpoint_at_pc pc;
+-    true
+-  | _ ->
+-    false
+-
+-let add_fun_break_from_tables expr =
+-  (* Try our table of functions *)
+-  match expr with
+-  | E_ident lid -> 
+-    begin
+-      let name = (String.concat "." (Longident.flatten lid)) in
+-      if add_fun_break_from_tables' name then true
+-      else begin
+-        (* Try to add current module, if any. *)
+-        match !current_event with
+-        | Some {ev_frag; ev_ev} -> 
+-          begin
+-            let md = ev_ev.ev_module in
+-            let name2 = md ^ "." ^ name in
+-            add_fun_break_from_tables' name2
+-          end
+-          | _ -> false
+-      end
+-    end
+-  | _ -> false
+-
+ let instr_break ppf lexbuf =
+   let argument = break_argument_eol Lexer.lexeme lexbuf in
+     ensure_loaded ();
+@@ -649,7 +613,6 @@
+     | BA_pc {frag; pos} ->                      (* break PC *)
+         add_breakpoint_at_pc {frag; pos}
+     | BA_function expr ->                       (* break FUNCTION *)
+-      if not (add_fun_break_from_tables expr) then
+         let env =
+           try
+             env_of_event !selected_event
+@@ -660,7 +623,7 @@
+         in
+         begin try
+           let (v, ty) = Eval.expression !selected_event env expr in
+-          match Soc_compat.types_get_desc ty with
++          match get_desc ty with
+           | Tarrow _ ->
+               add_breakpoint_after_pc (Remote_value.closure_code v)
+           | _ ->
+@@ -730,63 +693,6 @@
+     | Not_found ->
+         error ("No frame number " ^ Int.to_string frame_number ^ ".")
+ 
+-let instr_what ppf lexbuf =
+-  let frame_number =
+-    match opt_integer_eol Lexer.lexeme lexbuf with
+-    | None -> !current_frame
+-    | Some x -> x
+-  in
+-    ensure_loaded ();
+-    try
+-      select_frame frame_number;
+-      match !selected_event with
+-      | None -> ()
+-      | Some sel_ev ->
+-        show_current_frame ppf true;
+-        Sdumper.print_event sel_ev.ev_ev
+-    with
+-    | Not_found ->
+-        error ("No frame number " ^ Int.to_string frame_number ^ ".")
+-
+-let id_table_names (idtbl: int Ident.tbl) =
+-  let result: string list ref = ref [] in
+-  Ident.iter (fun id valu -> result := (Ident.name id) :: !result) idtbl;
+-  !result
+-
+-let comp_env_names (ev: Instruct.debug_event)  =
+-    let ce : Instruct.compilation_env = ev.ev_compenv in
+-    let stack : int Ident.tbl = ce.ce_stack in
+-    let heap : int Ident.tbl = ce.ce_heap in
+-    let recs : int Ident.tbl = ce.ce_rec in
+-    (id_table_names stack) @ 
+-    (id_table_names heap) @
+-    (id_table_names recs)
+-
+-let xinstr_print ppf lexbuf = 
+-  let frame_number =
+-    match opt_integer_eol Lexer.lexeme lexbuf with
+-    | None -> !current_frame
+-    | Some x -> x
+-  in
+-    ensure_loaded ();
+-    try
+-      select_frame frame_number;
+-      match !selected_event with
+-      | None -> ()
+-      | Some sel_ev ->
+-        begin
+-          show_current_frame ppf true;
+-          let ce_names = List.rev (comp_env_names sel_ev.ev_ev) in
+-          List.iter (fun line -> 
+-            let lexbuf2 = Lexing.from_string line in
+-            try print_command !max_printer_depth ppf lexbuf2
+-            with _ -> ()
+-            ) ce_names
+-        end
+-      with
+-      | Not_found ->
+-        error ("No frame number " ^ Int.to_string frame_number ^ ".")
+-
+ let instr_backtrace ppf lexbuf =
+   let number =
+     match opt_signed_integer_eol Lexer.lexeme lexbuf with
+@@ -893,7 +799,7 @@
+               1
+           | None ->
+               begin try
+-                Soc_compat.int_max 1 (line - 10)
++                Int.max 1 (line - 10)
+               with Out_of_range ->
+                 1
+               end
+@@ -1007,22 +913,6 @@
+      print_newline ())
+ *********)
+ 
+-let pr_functions ppf prefix funs =
+- let pr_funs ppf = List.iter 
+- (function x -> 
+-  match prefix with
+-  | Some prefix -> 
+-    if Soc_compat.starts_with ~prefix x then
+-      fprintf ppf "%s@ " x
+-  | None -> fprintf ppf "%s@ " x)
+- in
+- fprintf ppf "Used functions: @.%a@?" pr_funs funs
+-
+-let info_functions ppf lexbuf =
+-  let prefix = module_of_longident (opt_longident_eol Lexer.lexeme lexbuf) in
+-  ensure_loaded ();
+-  pr_functions ppf prefix !functions
+-
+ let info_checkpoints ppf lexbuf =
+   eol lexbuf;
+   if !checkpoints = [] then fprintf ppf "No checkpoint.@."
+@@ -1091,19 +981,7 @@
+            (match ev.ev_repr with
+               Event_none        -> ""
+             | Event_parent _    -> "(repr)"
+-            | Event_child repr  -> Int.to_string !repr);
+-          if !event_detail >= 1 then begin
+-            show_point ev false;
+-            if !event_detail >= 2 then begin
+-              printf "@[<2>{Ids in scope:@ ";
+-              List.iter (fun id -> printf "%s@ " id) (comp_env_names ev);
+-              printf "}@]@.";
+-              if !event_detail >= 3 then begin
+-                Sdumper.print_ev ev
+-              end
+-            end
+-          end
+-          )
++            | Event_child repr  -> Int.to_string !repr))
+       events
+ 
+ (** User-defined printers **)
+@@ -1205,9 +1083,6 @@
+      { instr_name = "print"; instr_prio = true;
+        instr_action = instr_print; instr_repeat = true; instr_help =
+ "print value of expressions (deep printing)." };
+-     { instr_name = "xprint"; instr_prio = true;
+-       instr_action = xinstr_print; instr_repeat = true; instr_help =
+-"print value of all variables (deep printing)." };
+      { instr_name = "display"; instr_prio = true;
+        instr_action = instr_display; instr_repeat = true; instr_help =
+ "print value of expressions (shallow printing)." };
+@@ -1245,11 +1120,6 @@
+ "select and print a stack frame.\n\
+ With no argument, print the selected stack frame.\n\
+ An argument specifies the frame to select." };
+-     { instr_name = "what"; instr_prio = false;
+-       instr_action = instr_what; instr_repeat = false; instr_help =
+-"select a stack frame and show what is available.\n\
+-With no argument, print the selected stack frame.\n\
+-An argument specifies the frame to select." };
+      { instr_name = "backtrace"; instr_prio = false;
+        instr_action = instr_backtrace; instr_repeat = true; instr_help =
+ "print backtrace of all stack frames, or innermost COUNT frames.\n\
+@@ -1351,27 +1221,13 @@
+      { var_name = "break_on_load";
+        var_action = boolean_variable false break_on_load;
+        var_help =
+-"whether to stop after loading new code (e.g. with Dynlink)." };
+-     { var_name = "event_detail";
+-       var_action = integer_variable false 0 "Must be at least 0"
+-                                     event_detail;
+-       var_help = 
+-"Amount of detail to give details when listing events.\n\
+-  0 = minimal information,\n\
+-  1 = adds display of source\n\
+-  2 = adds display of in-scope identifiers\n\
+-  3 = verbose display
+-"}
+-];
++"whether to stop after loading new code (e.g. with Dynlink)." }];
+ 
+   info_list :=
+     (* info name, function, help *)
+     [{ info_name = "modules";
+        info_action = info_modules ppf;
+        info_help = "list opened modules." };
+-     { info_name = "functions";
+-       info_action = info_functions ppf;
+-       info_help = "list opened functions matching optional prefix (or all)." };     
+      { info_name = "checkpoints";
+        info_action = info_checkpoints ppf;
+        info_help = "list checkpoints." };
+diff -ru sdebugger/command_line.mli /home/fordrl/e/ocaml5-fresh/debugger/command_line.mli
+--- sdebugger/command_line.mli	2023-03-01 06:57:30.306937130 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/command_line.mli	2023-03-08 15:39:22.365632865 -0500
+@@ -16,8 +16,8 @@
+ 
+ (************************ Reading and executing commands ***************)
+ 
+-open Lexing;;
+-open Format;;
++open Lexing
++open Format
+ 
+-val interprete_line : formatter -> string -> bool;;
+-val line_loop : formatter -> lexbuf -> unit;;
++val interprete_line : formatter -> string -> bool
++val line_loop : formatter -> lexbuf -> unit
+diff -ru sdebugger/debugcom.ml /home/fordrl/e/ocaml5-fresh/debugger/debugcom.ml
+--- sdebugger/debugcom.ml	2023-03-01 06:57:30.306937130 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/debugcom.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -49,6 +49,31 @@
+   { frag : int;
+     pos : int; }
+ 
++module Sp = struct
++
++  (* Position in the debuggee's stack. *)
++  type t = {
++    block : int;
++    offset : int;
++  }
++
++  let null = { block = -1; offset = -1}
++
++  let base sp n = {sp with offset = sp.offset - n}
++
++  let compare sp1 sp2 =
++    match Stdlib.compare sp1.block sp2.block with
++    | 0 -> Stdlib.compare sp1.offset sp2.offset
++    | x -> x
++
++end
++
++(* Identifier of the code fragment for the main program.
++   Numbering starts at 1 and the runtime registers 2 fragments before
++   the main program: one for uncaught exceptions and one for callbacks.
++*)
++let main_frag = 3
++
+ let set_event {frag; pos} =
+   output_char !conn.io_out 'e';
+   output_binary_int !conn.io_out frag;
+@@ -79,7 +104,7 @@
+ type report = {
+   rep_type : execution_summary;
+   rep_event_count : int64;
+-  rep_stack_pointer : int;
++  rep_stack_pointer : Sp.t;
+   rep_program_pointer : pc
+ }
+ 
+@@ -112,12 +137,13 @@
+          |  c  -> Misc.fatal_error (Printf.sprintf "Debugcom.do_go %c" c)
+        in
+        let event_counter = input_binary_int !conn.io_in in
+-       let stack_pos = input_binary_int !conn.io_in in
++       let block = input_binary_int !conn.io_in in
++       let offset = input_binary_int !conn.io_in in
+        let frag = input_binary_int !conn.io_in in
+        let pos = input_binary_int !conn.io_in in
+        { rep_type = summary;
+          rep_event_count = Int64.of_int event_counter;
+-         rep_stack_pointer = stack_pos;
++         rep_stack_pointer = Sp.{block; offset};
+          rep_program_pointer = {frag; pos} })
+ 
+ let rec do_go n =
+@@ -166,10 +192,11 @@
+ let initial_frame () =
+   output_char !conn.io_out '0';
+   flush !conn.io_out;
+-  let stack_pos = input_binary_int !conn.io_in in
++  let block = input_binary_int !conn.io_in in
++  let offset = input_binary_int !conn.io_in in
+   let frag = input_binary_int !conn.io_in in
+   let pos = input_binary_int !conn.io_in in
+-  (stack_pos, {frag; pos})
++  (Sp.{block; offset}, {frag; pos})
+ 
+ let set_initial_frame () =
+   ignore(initial_frame ())
+@@ -182,35 +209,43 @@
+   output_char !conn.io_out 'U';
+   output_binary_int !conn.io_out stacksize;
+   flush !conn.io_out;
+-  let stack_pos = input_binary_int !conn.io_in in
++  let block = input_binary_int !conn.io_in in
++  let offset = input_binary_int !conn.io_in in
+   let frag, pos =
+-    if stack_pos = -1
+-    then 0, 0
+-    else let frag = input_binary_int !conn.io_in in
+-         let pos = input_binary_int !conn.io_in in
+-         frag, pos
++    if block = -1 then
++    begin
++      assert (offset = -1);
++      0, 0
++    end else begin
++      let frag = input_binary_int !conn.io_in in
++      let pos = input_binary_int !conn.io_in in
++      frag, pos
++    end
+   in
+-  (stack_pos, { frag; pos })
++  (Sp.{block; offset}, { frag; pos })
+ 
+ (* Get and set the current frame position *)
+ 
+ let get_frame () =
+   output_char !conn.io_out 'f';
+   flush !conn.io_out;
+-  let stack_pos = input_binary_int !conn.io_in in
++  let block = input_binary_int !conn.io_in in
++  let offset = input_binary_int !conn.io_in in
+   let frag = input_binary_int !conn.io_in in
+   let pos = input_binary_int !conn.io_in in
+-  (stack_pos, {frag; pos})
++  (Sp.{block; offset}, {frag; pos})
+ 
+ let set_frame stack_pos =
+   output_char !conn.io_out 'S';
+-  output_binary_int !conn.io_out stack_pos
++  output_binary_int !conn.io_out stack_pos.Sp.block;
++  output_binary_int !conn.io_out stack_pos.Sp.offset
+ 
+ (* Set the trap barrier to given stack position. *)
+ 
+ let set_trap_barrier pos =
+   output_char !conn.io_out 'b';
+-  output_binary_int !conn.io_out pos
++  output_binary_int !conn.io_out pos.Sp.block;
++  output_binary_int !conn.io_out pos.Sp.offset
+ 
+ (* Handling of remote values *)
+ 
+diff -ru sdebugger/debugcom.mli /home/fordrl/e/ocaml5-fresh/debugger/debugcom.mli
+--- sdebugger/debugcom.mli	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/debugcom.mli	2023-03-08 15:39:22.365632865 -0500
+@@ -16,10 +16,19 @@
+ 
+ (* Low-level communication with the debuggee *)
+ 
++module Sp : sig
++  type t
++  val null : t
++  val base : t -> int -> t
++  val compare : t -> t -> int
++end
++
+ type pc =
+   { frag : int;
+     pos : int; }
+ 
++val main_frag : int
++
+ type execution_summary =
+     Event
+   | Breakpoint
+@@ -33,7 +42,7 @@
+ type report =
+   { rep_type : execution_summary;
+     rep_event_count : int64;
+-    rep_stack_pointer : int;
++    rep_stack_pointer : Sp.t;
+     rep_program_pointer : pc }
+ 
+ type checkpoint_report =
+@@ -70,23 +79,25 @@
+ 
+ (* Move to initial frame (that of current function). *)
+ (* Return stack position and current pc *)
+-val initial_frame : unit -> int * pc
++val initial_frame : unit -> Sp.t * pc
+ val set_initial_frame : unit -> unit
+ 
+ (* Get the current frame position *)
+ (* Return stack position and current pc *)
+-val get_frame : unit -> int * pc
++val get_frame : unit -> Sp.t * pc
+ 
+ (* Set the current frame *)
+-val set_frame : int -> unit
++val set_frame : Sp.t -> unit
+ 
+ (* Move up one frame *)
+ (* Return stack position and current pc.
+-   If there's no frame above, return (-1, 0). *)
+-val up_frame : int -> int * pc
++   If there's no frame above, return (null_sp, _).
++   The argument is the size of the current frame.
++ *)
++val up_frame : int -> Sp.t * pc
+ 
+ (* Set the trap barrier to given stack position. *)
+-val set_trap_barrier : int -> unit
++val set_trap_barrier : Sp.t -> unit
+ 
+ (* Set whether the debugger follow the child or the parent process on fork *)
+ val fork_mode : follow_fork_mode ref
+diff -ru sdebugger/debugger_config.ml /home/fordrl/e/ocaml5-fresh/debugger/debugger_config.ml
+- -- sdebugger/debugger_config.ml	2023-03-01 18:46:51.464886320 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/debugger_config.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -85,8 +85,6 @@
+ (* Whether to break when new code is loaded. *)
+ let break_on_load = ref true
+ 
+-let event_detail = ref 1
+-
+ (*** Environment variables for debuggee. ***)
+ 
+ let environment = ref []
+diff -ru sdebugger/debugger_config.mli /home/fordrl/e/ocaml5-fresh/debugger/debugger_config.mli
+--- sdebugger/debugger_config.mli	2023-03-01 18:47:52.817138216 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/debugger_config.mli	2023-03-08 15:39:22.365632865 -0500
+@@ -35,7 +35,6 @@
+ val checkpoint_max_count : int ref
+ val make_checkpoints : bool ref
+ val break_on_load : bool ref
+-val event_detail : int ref
+ 
+ (*** Environment variables for debuggee. ***)
+ 
+diff -ru sdebugger/debugger_parser.mly /home/fordrl/e/ocaml5-fresh/debugger/debugger_parser.mly
+--- sdebugger/debugger_parser.mly	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/debugger_parser.mly	2023-03-08 15:39:40.785702137 -0500
+@@ -237,7 +237,8 @@
+ 
+ break_argument_eol :
+     end_of_line                                 { BA_none }
+-  | integer_eol                                 { BA_pc {frag = 0; pos = $1} }
++  | integer_eol                                 { BA_pc {frag = main_frag;
++                                                         pos = $1} }
+   | INTEGER COLON integer_eol                   { BA_pc {frag = to_int $1;
+                                                          pos = $3} }
+   | expression end_of_line                      { BA_function $1 }
+Only in /home/fordrl/e/ocaml5-fresh/debugger: .depend
+diff -ru sdebugger/dune /home/fordrl/e/ocaml5-fresh/debugger/dune
+--- sdebugger/dune	2023-03-05 12:35:04.057905053 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/dune	2023-03-08 15:39:22.365632865 -0500
+@@ -14,22 +14,14 @@
+ 
+ ; mshinwell: Disabled for now -- otherlibs/dynlink/dune needs fixing first.
+ 
+-(ocamllex debugger_lexer)
+-(ocamlyacc debugger_parser)
+-
+-(library
+- (name sdebugger)
+- (public_name sdebugger)
+- (modes byte)
+- (flags (:standard -w -8..69))
+- (modules_without_implementation parser_aux)
+- (libraries
+-   compiler-libs.bytecomp
+-   compiler-libs.common
+-   compiler-libs.optcomp
+-   compiler-libs.toplevel
+-   dynlink
+-   unix
+-   str
+-   soc_compat
+-   ))
++;(ocamllex lexer)
++;(ocamlyacc parser)
++;
++;(executable
++; (name main)
++; (modes byte)
++; (flags (:standard -w -9))
++; (modules_without_implementation parser_aux)
++; (libraries ocamlcommon ocamltoplevel runtime stdlib unix))
++;
++;(rule (copy main.exe ocamldebug.byte))
+diff -ru sdebugger/eval.ml /home/fordrl/e/ocaml5-fresh/debugger/eval.ml
+--- sdebugger/eval.ml	2023-03-02 15:47:01.365298443 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/eval.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -112,7 +112,7 @@
+       end
+   | E_item(arg, n) ->
+       let (v, ty) = expression event env arg in
+-      begin match Soc_compat.types_get_desc (Ctype.expand_head_opt env ty) with
++      begin match get_desc (Ctype.expand_head_opt env ty) with
+         Ttuple ty_list ->
+           if n < 1 || n > List.length ty_list
+           then raise(Error(Tuple_index(ty, List.length ty_list, n)))
+@@ -142,7 +142,7 @@
+       end
+   | E_field(arg, lbl) ->
+       let (v, ty) = expression event env arg in
+-      begin match Soc_compat.types_get_desc (Ctype.expand_head_opt env ty) with
++      begin match get_desc (Ctype.expand_head_opt env ty) with
+         Tconstr(path, _, _) ->
+           let tydesc = Env.find_type path env in
+           begin match tydesc.type_kind with
+diff -ru sdebugger/events.ml /home/fordrl/e/ocaml5-fresh/debugger/events.ml
+--- sdebugger/events.ml	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/events.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -27,7 +27,6 @@
+   | Event_before -> ev.ev_loc.Location.loc_start
+   | Event_after _ -> ev.ev_loc.Location.loc_end
+   | _ -> ev.ev_loc.Location.loc_start
+-;;
+ 
+ 
+ (*** Current events. ***)
+diff -ru sdebugger/events.mli /home/fordrl/e/ocaml5-fresh/debugger/events.mli
+--- sdebugger/events.mli	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/events.mli	2023-03-08 15:39:22.365632865 -0500
+@@ -21,7 +21,7 @@
+   { ev_frag : int;
+     ev_ev : Instruct.debug_event }
+ 
+-val get_pos : debug_event -> Lexing.position;;
++val get_pos : debug_event -> Lexing.position
+ 
+ (** Current events. **)
+ 
+diff -ru sdebugger/frames.ml /home/fordrl/e/ocaml5-fresh/debugger/frames.ml
+--- sdebugger/frames.ml	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/frames.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -53,7 +53,7 @@
+ let rec move_up frame_count event =
+   if frame_count <= 0 then event else begin
+     let (sp, pc) = up_frame event.ev_ev.ev_stacksize in
+-    if sp < 0 then raise Not_found;
++    if sp = Sp.null then raise Not_found;
+     move_up (frame_count - 1) (any_event_at_pc pc)
+   end
+ 
+@@ -113,7 +113,7 @@
+       begin try
+         while action (Some !event) do
+           let (sp, pc) = up_frame !event.ev_ev.ev_stacksize in
+-          if sp < 0 then raise Exit;
++          if sp = Sp.null then raise Exit;
+           event := any_event_at_pc pc
+         done
+       with Exit -> ()
+Only in sdebugger: functions.ml
+Only in sdebugger: functions.mli
+diff -ru sdebugger/int64ops.ml /home/fordrl/e/ocaml5-fresh/debugger/int64ops.ml
+--- sdebugger/int64ops.ml	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/int64ops.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -15,13 +15,13 @@
+ 
+ (****************** arithmetic operators for Int64 *********************)
+ 
+-let ( ++ ) = Int64.add;;
+-let ( -- ) = Int64.sub;;
+-let suc64 = Int64.succ;;
+-let pre64 = Int64.pred;;
+-let _0 = Int64.zero;;
+-let _1 = Int64.one;;
+-let _minus1 = Int64.minus_one;;
+-let ( ~~ ) = Int64.of_string;;
+-let max_small_int = Int64.of_int max_int;;
+-let to_int = Int64.to_int;;
++let ( ++ ) = Int64.add
++let ( -- ) = Int64.sub
++let suc64 = Int64.succ
++let pre64 = Int64.pred
++let _0 = Int64.zero
++let _1 = Int64.one
++let _minus1 = Int64.minus_one
++let ( ~~ ) = Int64.of_string
++let max_small_int = Int64.of_int max_int
++let to_int = Int64.to_int
+diff -ru sdebugger/int64ops.mli /home/fordrl/e/ocaml5-fresh/debugger/int64ops.mli
+--- sdebugger/int64ops.mli	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/int64ops.mli	2023-03-08 15:39:22.365632865 -0500
+@@ -15,13 +15,13 @@
+ 
+ (****************** arithmetic operators for Int64 *********************)
+ 
+-val ( ++ ) : int64 -> int64 -> int64;;
+-val ( -- ) : int64 -> int64 -> int64;;
+-val suc64 : int64 -> int64;;
+-val pre64 : int64 -> int64;;
+-val _0 : int64;;
+-val _1 : int64;;
+-val _minus1 : int64;;
+-val ( ~~ ) : string -> int64;;
+-val max_small_int : int64;;
+-val to_int : int64 -> int;;
++val ( ++ ) : int64 -> int64 -> int64
++val ( -- ) : int64 -> int64 -> int64
++val suc64 : int64 -> int64
++val pre64 : int64 -> int64
++val _0 : int64
++val _1 : int64
++val _minus1 : int64
++val ( ~~ ) : string -> int64
++val max_small_int : int64
++val to_int : int64 -> int
+diff -ru sdebugger/main.ml /home/fordrl/e/ocaml5-fresh/debugger/main.ml
+--- sdebugger/main.ml	2023-03-02 14:38:56.107098924 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/main.ml	2023-03-08 15:39:40.785702137 -0500
+@@ -160,12 +160,11 @@
+   Sys.chdir dir
+ let print_version () =
+   printf "The OCaml debugger, version %s@." Sys.ocaml_version;
+-  exit 0;
+-;;
++  exit 0
++
+ let print_version_num () =
+   printf "%s@." Sys.ocaml_version;
+-  exit 0;
+-;;
++  exit 0
+ 
+ let speclist = [
+    "-c", Arg.Int set_checkpoints,
+@@ -230,7 +229,7 @@
+     if !Parameters.version
+     then printf "\tOCaml Debugger version %s@.@." Config.version;
+     Loadprinter.init();
+-    Soc_compat.load_path_init !default_load_path;
++    Load_path.init ~auto_include:Compmisc.auto_include !default_load_path;
+     Clflags.recursive_types := true;    (* Allow recursive types. *)
+     toplevel_loop ();                   (* Toplevel. *)
+     kill_program ();
+Only in sdebugger: main.mli
+diff -ru sdebugger/Makefile /home/fordrl/e/ocaml5-fresh/debugger/Makefile
+--- sdebugger/Makefile	2023-03-01 06:55:06.030321315 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/Makefile	2023-03-08 15:39:40.785702137 -0500
+@@ -21,9 +21,9 @@
+ DYNLINKDIR=$(ROOTDIR)/otherlibs/dynlink
+ UNIXDIR=$(ROOTDIR)/otherlibs/unix
+ 
+-CAMLC=$(BEST_OCAMLC) $(STDLIBFLAGS)
++CAMLC=$(BEST_OCAMLC) $(STDLIBFLAGS) -g
+ COMPFLAGS=$(INCLUDES) -absname -w +a-4-9-41-42-44-45-48-70 -warn-error +A \
+-          -strict-sequence -strict-formats
++          -safe-string -strict-sequence -strict-formats
+ LINKFLAGS=-linkall -I $(UNIXDIR) -I $(DYNLINKDIR)
+ OC_OCAMLDEPDIRS = $(DIRECTORIES)
+ 
+@@ -32,8 +32,7 @@
+ 
+ INCLUDES=$(addprefix -I ,$(DIRECTORIES))
+ 
+-compiler_modules := $(addprefix $(ROOTDIR)/toplevel/,\
+-  genprintval topprinters)
++compiler_modules := $(ROOTDIR)/toplevel/genprintval
+ 
+ debugger_modules := \
+   int64ops primitives unix_tools debugger_config parameters debugger_lexer \
+@@ -52,11 +51,11 @@
+ all: ocamldebug$(EXE)
+ 
+ ocamldebug.cmo: $(debugger_objects)
+-	$(V_OCAMLC)$(CAMLC) -pack $(COMPFLAGS) -o $@ $^
++	$(CAMLC) -pack $(COMPFLAGS) -o $@ $^
+ 
+ ocamldebug$(EXE): $(libraries) $(compiler_objects) ocamldebug.cmo \
+     ocamldebug_entry.cmo
+-	$(V_LINKC)$(CAMLC) $(LINKFLAGS) -o $@ -linkall $^
++	$(CAMLC) $(LINKFLAGS) -o $@ -linkall $^
+ 
+ install:
+ 	$(INSTALL_PROG) ocamldebug$(EXE) "$(INSTALL_BINDIR)"
+@@ -70,23 +69,23 @@
+ distclean: clean
+ 
+ ocamldebug_entry.cmo: ocamldebug_entry.ml ocamldebug.cmo
+-	$(V_OCAMLC)$(CAMLC) -c $(COMPFLAGS) $<
++	$(CAMLC) -c $(COMPFLAGS) $<
+ 
+ %.cmo: %.ml
+-	$(V_OCAMLC)$(CAMLC) -c $(COMPFLAGS) -for-pack ocamldebug $<
++	$(CAMLC) -c $(COMPFLAGS) -for-pack ocamldebug $<
+ 
+ %.cmi: %.mli
+-	$(V_OCAMLC)$(CAMLC) -c $(COMPFLAGS) -for-pack ocamldebug $<
++	$(CAMLC) -c $(COMPFLAGS) -for-pack ocamldebug $<
+ 
+ depend: beforedepend
+-	$(V_OCAMLDEP)$(OCAMLDEP_CMD) *.mli *.ml > .depend
++	$(OCAMLDEP_CMD) *.mli *.ml > .depend
+ 
+ clean::
+ 	rm -f debugger_lexer.ml
+ beforedepend:: debugger_lexer.ml
+ 
+ clean::
+-	rm -f $(addprefix debugger_parser.,ml mli output)
++	rm -f debugger_parser.ml debugger_parser.mli
+ beforedepend:: debugger_parser.ml debugger_parser.mli
+ 
+ include .depend
+diff -ru sdebugger/ocamldebug_entry.ml /home/fordrl/e/ocaml5-fresh/debugger/ocamldebug_entry.ml
+--- sdebugger/ocamldebug_entry.ml	2023-03-01 07:02:55.652315204 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/ocamldebug_entry.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -1,2 +1,2 @@
+ let _ =
+-  Unix.handle_unix_error Main.main ()
++  Unix.handle_unix_error Ocamldebug.Main.main ()
+Only in sdebugger: opnames.ml
+Only in sdebugger: opnames.mli
+Only in /home/fordrl/e/ocaml5-fresh/debugger: pattern_matching.ml
+Only in /home/fordrl/e/ocaml5-fresh/debugger: pattern_matching.mli
+diff -ru sdebugger/pos.mli /home/fordrl/e/ocaml5-fresh/debugger/pos.mli
+--- sdebugger/pos.mli	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/pos.mli	2023-03-08 15:39:22.365632865 -0500
+@@ -13,4 +13,4 @@
+ (*                                                                        *)
+ (**************************************************************************)
+ 
+-val get_desc : Events.code_event -> string;;
++val get_desc : Events.code_event -> string
+diff -ru sdebugger/primitives.ml /home/fordrl/e/ocaml5-fresh/debugger/primitives.ml
+--- sdebugger/primitives.ml	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/primitives.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -117,8 +117,7 @@
+ 
+ let close_io io_channel =
+   close_out_noerr io_channel.io_out;
+-  close_in_noerr io_channel.io_in;
+-;;
++  close_in_noerr io_channel.io_in
+ 
+ let std_io = {
+   io_in = stdin;
+diff -ru sdebugger/program_loading.ml /home/fordrl/e/ocaml5-fresh/debugger/program_loading.ml
+--- sdebugger/program_loading.ml	2023-03-07 19:18:17.884944119 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/program_loading.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -42,7 +42,6 @@
+     Printf.sprintf "%s=%s " vname (Filename.quote vvalue)
+   in
+   String.concat "" (List.map f !Debugger_config.environment)
+-;;
+ 
+ (* Notes:
+    1. This quoting is not the same as [Filename.quote] because the "set"
+@@ -65,7 +64,6 @@
+     Buffer.add_char b s.[i];
+   done;
+   Buffer.contents b
+-;;
+ 
+ (* Returns a command line prefix to set environment for the debuggee *)
+ let get_win32_environment () =
+diff -ru sdebugger/program_management.ml /home/fordrl/e/ocaml5-fresh/debugger/program_management.ml
+--- sdebugger/program_management.ml	2023-03-05 06:23:17.719631300 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/program_management.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -127,16 +127,16 @@
+     raise Toplevel;
+   end;
+   Symbols.clear_symbols ();
+-  let ic = Symbols.read_symbols 0 !program_name in
+-  (* Functions.find_functions 0 ic ; *)
+-  Soc_compat.load_path_init (Load_path.get_paths () @ !Symbols.program_source_dirs);
++  Symbols.read_symbols Debugcom.main_frag !program_name;
++  let dirs = Load_path.get_paths () @ !Symbols.program_source_dirs in
++  Load_path.init ~auto_include:Compmisc.auto_include dirs;
+   Envaux.reset_cache ();
+   if !debug_loading then
+     prerr_endline "Opening a socket...";
+   open_connection !socket_name
+     (function () ->
+       go_to _0;
+-      Symbols.set_all_events 0;
++      Symbols.set_all_events Debugcom.main_frag;
+       exit_main_loop ())
+ 
+ (* Ensure the program is already loaded. *)
+Only in sdebugger: sdumper.ml
+diff -ru sdebugger/show_source.mli /home/fordrl/e/ocaml5-fresh/debugger/show_source.mli
+--- sdebugger/show_source.mli	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/show_source.mli	2023-03-08 15:39:22.365632865 -0500
+@@ -15,12 +15,11 @@
+ (**************************************************************************)
+ 
+ (* Print the line containing the point *)
+-val show_point : Instruct.debug_event -> bool -> unit;;
++val show_point : Instruct.debug_event -> bool -> unit
+ 
+ (* Tell Emacs we are nowhere in the source. *)
+-val show_no_point : unit -> unit;;
++val show_no_point : unit -> unit
+ 
+ (* Display part of the source. *)
+ val show_listing :
+   Lexing.position -> string -> int -> int -> int -> bool -> unit
+-;;
+diff -ru sdebugger/symbols.ml /home/fordrl/e/ocaml5-fresh/debugger/symbols.ml
+--- sdebugger/symbols.ml	2023-03-09 14:29:42.209023258 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/symbols.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -22,71 +22,6 @@
+ open Debugcom
+ open Events
+ module String = Misc.Stdlib.String
+-open Format
+-
+-(* List of directories to act as workspace roots. *)
+-let workspace_roots = ref String.Set.empty
+-
+-let workspace_marker = "/workspace_root"
+-let workspace_marker_slash = "/workspace_root/"
+-
+-let workspace_marker_len = String.length workspace_marker
+-let build_dir = "_build"
+-
+-(* Does str.[index] match a file separator. *)
+-let matches_file_sep str index =
+-  if index >= String.length str then false
+-  else let c = str.[index] in
+-    (c = '/' || c = '\\')
+-
+-let matches_substring pat str start =
+-  let pat_len = String.length pat in
+-  let str_len = String.length str in
+-  if (start + pat_len) > str_len then 
+-    (* Not enough characters *)
+-    false
+-  else
+-    String.sub str start pat_len = pat
+-
+-let find_last_build_dir_in (dir: string) =
+-  let bdlen = String.length build_dir in
+-  let rec loop i =
+-    if i < 0 then None
+-    else 
+-      if (matches_file_sep dir i) &&
+-        (matches_substring build_dir dir (i + 1)) &&
+-        (matches_file_sep dir (i + bdlen + 1)) then Some i
+-      else loop (i - 1)
+-    in
+-    loop (String.length dir - 1)
+-
+-(* We only try to map workspace roots if the marker does not exists. *)
+-let do_workspace_map = not (Sys.file_exists workspace_marker)
+-
+-let add_workspace_root filename  =
+-  if do_workspace_map then begin
+-    let the_realfile = Soc_compat.realpath filename in
+-    match find_last_build_dir_in the_realfile with
+-    | None -> ()
+-    | Some i -> 
+-      let root = String.sub the_realfile 0 i in
+-      printf "Adding %s to workspace roots@." root;
+-      workspace_roots := String.Set.add root !workspace_roots
+-  end
+-    
+-let has_workspace_marker dir_name =
+-  (dir_name = workspace_marker) ||
+-   Soc_compat.starts_with ~prefix: workspace_marker_slash dir_name
+-
+-(* Because we might have multiple workspace roots, a single
+-   filename might expand into multiple filenames. *)
+-let expand_workspace_root dir_name =
+-  if not (has_workspace_marker dir_name) then [dir_name]
+-  else begin
+-    let stem = String.sub dir_name workspace_marker_len 
+-              (String.length dir_name - workspace_marker_len) in
+-    List.map (fun root -> root ^ stem) (String.Set.elements !workspace_roots)
+-  end
+ 
+ let modules =
+   ref ([] : string list)
+@@ -94,23 +29,12 @@
+ let program_source_dirs =
+   ref ([] : string list)
+ 
+-let functions =
+-  ref ([] : string list)
+-
+ let events_by_pc =
+   (Hashtbl.create 257 : (pc, debug_event) Hashtbl.t)
+ let events_by_module =
+   (Hashtbl.create 17 : (string, int * debug_event array) Hashtbl.t)
+ let all_events_by_module =
+   (Hashtbl.create 17 : (string, int * debug_event list) Hashtbl.t)
+-let events_by_function =
+-  (Hashtbl.create 17 : (string, int * debug_event array) Hashtbl.t)
+-
+-let start_pc_by_function =
+-  (Hashtbl.create 17 : (string, pc list ref) Hashtbl.t)
+-
+-let exported_items_by_module =
+-  (Hashtbl.create 17 : (string, int * string array) Hashtbl.t)
+ 
+ let partition_modules evl =
+   let rec partition_modules' ev evl =
+@@ -131,7 +55,6 @@
+   | _                 -> ()
+ 
+ let read_symbols' bytecode_file =
+-  add_workspace_root bytecode_file;
+   let ic = open_in_bin bytecode_file in
+   begin try
+     Bytesections.read_toc ic;
+@@ -157,116 +80,24 @@
+     List.iter (relocate_event orig) evl;
+     let evll = partition_modules evl in
+     eventlists := evll @ !eventlists;
+-    let dirlist = (input_value ic : string list) in
+     dirs :=
+-      List.fold_left 
+-      (fun s e -> 
+-        let expanded_dirs = expand_workspace_root e in
+-        List.fold_left (fun s d -> String.Set.add d s)  s expanded_dirs)
+-      !dirs dirlist
++      List.fold_left (fun s e -> String.Set.add e s) !dirs (input_value ic)
+   done;
+-  !eventlists, !dirs, ic
++  begin try
++    ignore (Bytesections.seek_section ic "CODE")
++  with Not_found ->
++    (* The file contains only debugging info,
++       loading mode is forced to "manual" *)
++    set_launching_function (List.assoc "manual" loading_modes)
++  end;
++  close_in_noerr ic;
++  !eventlists, !dirs
+ 
+ let clear_symbols () =
+   modules := [];
+   program_source_dirs := [];
+   Hashtbl.clear events_by_pc; Hashtbl.clear events_by_module;
+-  Hashtbl.clear all_events_by_module;
+-  functions := [];
+-  Hashtbl.clear start_pc_by_function; Hashtbl.clear exported_items_by_module
+-
+-let print_evl evl =
+-    List.iteri (fun i ev -> 
+-      printf "ev[%d]=" i; 
+-      Sdumper.print_event ev
+-      ) evl
+-
+-let print_functions () =
+-  printf "@[<2>{Function starts:@ ";
+-  List.iter (fun fname -> 
+-    let pcs = Hashtbl.find start_pc_by_function fname in
+-      printf "@[{Func: %s:@ " fname;
+-      List.iteri (fun i {frag;pos} -> 
+-        printf "startpc[%i]%d:%d(%d)@ " i frag pos (pos/4)
+-        ) !pcs;
+-      printf "}@]@.";
+-    ) !functions;
+-  printf "}@]@."
+-
+-let print_exports () =
+-  printf "{Module exports;@.";
+-  List.iter (fun md ->
+-    try 
+-      begin
+-        let (frag, exports) = Hashtbl.find exported_items_by_module md in
+-        printf "@[<2>{frag=%d, mod=%s, exports:@ " frag md;
+-        for i = 0 to (Array.length exports - 1) do
+-          printf "%i:%s@ " i exports.(i)
+-        done;
+-        printf "}@]@.";
+-      end
+-    with Not_found -> 
+-      printf "Module %s not found@." md
+-    ) !modules;
+-  printf "}@."
+-
+-let add_functions frag evl =
+-  (* 
+-  printf "add_functions, frag=%d, events:@." frag;
+-  print_evl evl;
+-  *)
+-  List.iter (fun ev ->
+-    let md = ev.ev_module in
+-    let fname = ev.ev_defname in
+-    let flen = String.length fname in
+-    if fname = "??" then begin
+-      if ev.ev_kind = Event_pseudo then begin
+-        if ev.ev_stacksize > 0 then
+-          let stack = Sdumper.get_stack ev in
+-          if Array.length stack > 0 then
+-            Hashtbl.add exported_items_by_module md (frag, stack);
+-      end
+-    end else if flen > 5 && String.sub fname (flen - 5) 5 = "(fun)" then begin
+-      (* Skip anonymous functions and operators *)
+-      ()
+-    end else begin
+-      if (ev.ev_kind = Event_before || ev.ev_kind=Event_pseudo) && 
+-          ev.ev_info=Event_function then begin
+-        let pc = {frag; pos=ev.ev_pos } in
+-        (* Start of new function *)
+-        if Hashtbl.mem start_pc_by_function fname then begin
+-          let prior = Hashtbl.find start_pc_by_function fname in
+-          prior := pc :: !prior
+-        end else
+-          Hashtbl.add start_pc_by_function fname (ref [pc])
+-      end
+-    end
+-    ) evl
+-  
+-let fill_unique_simple_names () =
+-  let short_to_long = 
+-    (Hashtbl.create 257 : (string, string list ref ) Hashtbl.t) in
+-  Hashtbl.iter (fun fname entry -> 
+-    let last_dot_opt = String.rindex_opt fname '.' in
+-    match last_dot_opt with
+-    | None -> ()
+-    | Some ld -> 
+-      let sname = String.sub fname (ld + 1) (String.length fname - ld - 1) in
+-      if Hashtbl.mem short_to_long sname then
+-        let entry = Hashtbl.find short_to_long sname in
+-        entry := fname :: !entry
+-      else
+-        Hashtbl.add short_to_long sname (ref [fname])
+-    ) start_pc_by_function;
+-
+-  (* Now see which simple names are unique. *)
+-  Hashtbl.iter (fun sname entry ->
+-    match !entry with
+-    | [fname] -> (* it is unique *)
+-      let entry = Hashtbl.find start_pc_by_function fname in
+-      Hashtbl.add start_pc_by_function sname entry
+-    | _ -> () (* Not unique *)
+-    ) short_to_long
++  Hashtbl.clear all_events_by_module
+ 
+ let add_symbols frag all_events =
+   List.iter
+@@ -286,7 +117,6 @@
+                                     (Events.get_pos ev2).Lexing.pos_cnum
+           in
+           let sorted_evl = List.sort cmp evl in
+-          add_functions frag sorted_evl;
+           modules := md :: !modules;
+           Hashtbl.add all_events_by_module md (frag, sorted_evl);
+           let real_evl =
+@@ -297,24 +127,12 @@
+               sorted_evl
+           in
+           Hashtbl.add events_by_module md (frag, Array.of_list real_evl))
+-    all_events;
+-  fill_unique_simple_names ();
+-  Hashtbl.iter (fun fname v ->
+-    functions := fname :: !functions;
+-    ) start_pc_by_function;
+-  functions := List.sort compare !functions;
+-  modules := List.rev !modules
+-  (*
+-  print_functions ();
+-  print_exports ()
+-  
+-  *)
+-  
++    all_events
++
+ let read_symbols frag bytecode_file =
+-  let all_events, all_dirs, ic = read_symbols' bytecode_file in
++  let all_events, all_dirs = read_symbols' bytecode_file in
+   program_source_dirs := !program_source_dirs @ (String.Set.elements all_dirs);
+-  add_symbols frag all_events;
+-  ic
++  add_symbols frag all_events
+ 
+ let erase_symbols frag =
+   let pcs = Hashtbl.fold (fun pc _ pcs ->
+diff -ru sdebugger/symbols.mli /home/fordrl/e/ocaml5-fresh/debugger/symbols.mli
+--- sdebugger/symbols.mli	2023-03-05 11:49:53.388953640 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/symbols.mli	2023-03-08 15:39:22.365632865 -0500
+@@ -19,23 +19,16 @@
+ (* Modules used by the program. *)
+ val modules : string list ref
+ 
+-(* Modules used by the program. *)
+-val functions : string list ref
+-
+ (* Absolute directories containing source code on machine where source was
+  * compiled *)
+ val program_source_dirs : string list ref
+ 
+-val start_pc_by_function : (string, Debugcom.pc list ref) Hashtbl.t
+-
+-val exported_items_by_module : (string, int * string array) Hashtbl.t
+-
+ (* Clear loaded symbols *)
+ val clear_symbols : unit -> unit
+ 
+ (* Read debugging info from executable or dynlinkable file
+    and associate with given code fragment *)
+-val read_symbols : int -> string -> in_channel
++val read_symbols : int -> string -> unit
+ 
+ (* Add debugging info from memory and associate with given
+    code fragment *)
+diff -ru sdebugger/time_travel.ml /home/fordrl/e/ocaml5-fresh/debugger/time_travel.ml
+--- sdebugger/time_travel.ml	2023-03-02 15:02:54.797551315 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/time_travel.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -380,8 +380,8 @@
+      c_parent = root;
+      c_breakpoint_version = 0;
+      c_breakpoints = [];
+-     c_trap_barrier = 0;
+-     c_code_fragments = [0]}
++     c_trap_barrier = Sp.null;
++     c_code_fragments = [main_frag]}
+   in
+     insert_checkpoint new_checkpoint
+ 
+@@ -506,7 +506,7 @@
+   let
+     {c_time = t} = find_checkpoint_before (pre64 time_max)
+   in
+-    go_to (Soc_compat.int64_max time t);
++    go_to (Int64.max time t);
+     let (new_time, break) = find_last_breakpoint time_max in
+     if break <> None || (new_time <= time) then begin
+       go_to new_time;
+@@ -520,7 +520,7 @@
+ let step_backward duration =
+   let time = current_time () in
+     if time > _0 then
+-      back_to (Soc_compat.int64_max _0 (time -- duration)) time
++      back_to (Int64.max _0 (time -- duration)) time
+ 
+ (* Run the program from current time. *)
+ (* Stop at the first breakpoint, or at the end of the program. *)
+@@ -555,7 +555,7 @@
+   | Some {ev_ev={ev_stacksize}} ->
+       set_initial_frame();
+       let (frame, pc) = up_frame ev_stacksize in
+-      if frame < 0 then begin
++      if frame = Sp.null then begin
+         prerr_endline "`finish' not meaningful in outermost frame.";
+         raise Toplevel
+       end;
+@@ -598,8 +598,9 @@
+         | Some {ev_ev={ev_stacksize=ev_stacksize2}} ->
+             let (frame2, _pc2) = initial_frame() in
+             (* Call `finish' if we've entered a function. *)
+-            if frame1 >= 0 && frame2 >= 0 &&
+-               frame2 - ev_stacksize2 > frame1 - ev_stacksize1
++            if frame1 <> Sp.null && frame2 <> Sp.null &&
++               Sp.(compare (base frame2 ev_stacksize2)
++                     (base frame1 ev_stacksize1)) > 0
+             then finish()
+       end
+ 
+@@ -622,7 +623,7 @@
+   | Some {ev_ev={ev_stacksize}} ->
+       let (frame, _) = initial_frame() in
+       let (frame', pc) = up_frame ev_stacksize in
+-      if frame' < 0 then begin
++      if frame' = Sp.null then begin
+         prerr_endline "`start not meaningful in outermost frame.";
+         raise Toplevel
+       end;
+@@ -644,7 +645,7 @@
+             step _minus1;
+             (not !interrupted)
+               &&
+-            (frame' - nargs > frame - ev_stacksize)
++            Sp.(compare (base frame' nargs) (base frame ev_stacksize)) > 0
+         | _ ->
+             false
+       do
+@@ -666,8 +667,9 @@
+         | Some {ev_ev={ev_stacksize=ev_stacksize2}} ->
+             let (frame2, _pc2) = initial_frame() in
+             (* Call `start' if we've entered a function. *)
+-            if frame1 >= 0 && frame2 >= 0 &&
+-               frame2 - ev_stacksize2 > frame1 - ev_stacksize1
++            if frame1 <> Sp.null && frame2 <> Sp.null &&
++              Sp.(compare (base frame2 ev_stacksize2)
++                    (base frame1 ev_stacksize1)) > 0
+             then start()
+       end
+ 
+diff -ru sdebugger/trap_barrier.ml /home/fordrl/e/ocaml5-fresh/debugger/trap_barrier.ml
+--- sdebugger/trap_barrier.ml	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/trap_barrier.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -19,13 +19,13 @@
+ open Debugcom
+ open Checkpoints
+ 
+-let current_trap_barrier = ref 0
++let current_trap_barrier = ref Sp.null
+ 
+ let install_trap_barrier pos =
+   current_trap_barrier := pos
+ 
+ let remove_trap_barrier () =
+-  current_trap_barrier := 0
++  current_trap_barrier := Sp.null
+ 
+ (* Ensure the trap barrier state is up to date in current checkpoint. *)
+ let update_trap_barrier () =
+diff -ru sdebugger/trap_barrier.mli /home/fordrl/e/ocaml5-fresh/debugger/trap_barrier.mli
+--- sdebugger/trap_barrier.mli	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/trap_barrier.mli	2023-03-08 15:39:22.365632865 -0500
+@@ -16,7 +16,7 @@
+ 
+ (************************* Trap barrier ********************************)
+ 
+-val install_trap_barrier : int -> unit
++val install_trap_barrier : Debugcom.Sp.t -> unit
+ 
+ val remove_trap_barrier : unit -> unit
+ 
+@@ -25,4 +25,4 @@
+ 
+ (* Execute `funct' with a trap barrier. *)
+ (* --- Used by `finish'. *)
+-val exec_with_trap_barrier : int -> (unit -> unit) -> unit
++val exec_with_trap_barrier : Debugcom.Sp.t -> (unit -> unit) -> unit
+diff -ru sdebugger/unix_tools.ml /home/fordrl/e/ocaml5-fresh/debugger/unix_tools.ml
+--- sdebugger/unix_tools.ml	2023-03-01 06:57:30.310937147 -0500
++++ /home/fordrl/e/ocaml5-fresh/debugger/unix_tools.ml	2023-03-08 15:39:22.365632865 -0500
+@@ -142,4 +142,3 @@
+   if Filename.is_relative name
+   then Filename.concat (getcwd ()) name
+   else name
+-;;
+Only in sdebugger: xx-dune-project
